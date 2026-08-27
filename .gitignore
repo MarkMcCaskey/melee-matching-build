@@ -1,2 +1,15 @@
-.dolphin-user/
 __pycache__/
+
+# Dolphin state created by the boot watcher / drivers
+.dolphin-user/
+.dolphin-pad/
+
+# Untracked scratch: input-driving and scene-scanning experiments built against
+# a local dolphin-dap / dolphin-decomp-mcp pair, with hardcoded paths. Kept on
+# disk, deliberately out of the package.
+/trapdrive.py
+/vsdrive.py
+/vsscan.py
+/menuscan.py
+/menuiter.py
+/attractscan.py

@@ -165,7 +165,7 @@ def run_once(dolphin, repo, mode, seconds, userdir, iso_override, tag=""):
            (repo / "ssbm_rev2.iso" if mode == "control"
             else repo / f"build/GALE01/ssbm-{mode}100.iso"))
     if not iso.exists():
-        sys.exit(f"{iso} missing; run traprom.py {mode} first")
+        sys.exit(f"{iso} missing; run trapbuild/traprom.py {mode} first")
     logpath = repo / f"build/GALE01/trapwatch-{mode}{tag}.log"
     cmd = [dolphin, "--platform", "headless", "-v", "Null",
            "-C", "Dolphin.General.GDBPort=55555",     # fork boots paused; we resume it
@@ -251,7 +251,7 @@ def main():
     keep, found = [], []
     for i in range(args.iterate):
         if keep:
-            cmd = [sys.executable, str(HERE / "traprom.py"), args.mode, "--repo", str(repo)]
+            cmd = [sys.executable, str(HERE / "trapbuild" / "traprom.py"), args.mode, "--repo", str(repo)]
             for k in keep:
                 cmd += ["--keep", k]
             print(f"\nrebuilding with {len(keep)} function(s) kept...")
