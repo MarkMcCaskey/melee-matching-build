@@ -1,140 +1,96 @@
 # melee-matching-build
 
-Build a version of Super Smash Bros. Melee in which every function the decomp
-has **not** byte-matched is replaced with a crash instruction, then boot it and
-see how far the game gets. The first crash names the unmatched function that is
-actually standing between you and a working 100%-matched build.
+Builds a variant of Super Smash Bros. Melee (GALE01 rev 2) in which every
+function the decomp has not byte-matched is overwritten with PowerPC trap
+instructions, and splices the result into a bootable ISO. Booting it identifies
+the unmatched function that execution reaches first, which orders matching work
+by reachability rather than by byte count.
 
-| | |
+```sh
+export MELEE_REPO=~/etc/melee   # a melee checkout with a green `ninja`
+
+make -C trapbuild fn            # -> build/GALE01/ssbm-fn100.iso   sub-100% functions
+make -C trapbuild tu            # -> build/GALE01/ssbm-tu100.iso   functions in unlinked TUs
+make -C trapbuild both          # both of the above
+```
+
+| path | |
 |---|---|
-| **[`trapbuild/`](trapbuild/)** | the ROM builder. Portable, standard library only, `make fn` and you have a trap ISO. **Start here** — it is also the part that is meant to be shared. |
-| `trapwatch.py` | boots a trap ISO under headless Dolphin, reads the crash out of the log, and `--iterate N` walks the whole blocker list. Needs a Dolphin with the nogui frontend. |
+| [`trapbuild/`](trapbuild/) | the ROM builder: `traprom.py`, a Makefile and a usage reference. Standard library only. |
+| `trapwatch.py` | boots a trap ISO under headless Dolphin and reports the crash. Requires a Dolphin built with the nogui frontend. |
 
-Everything else in this directory is untracked scratch: input-driving and
-scene-scanning experiments (`trapdrive`, `vsdrive`, `vsscan`, `menuscan`,
-`menuiter`, `attractscan`) built against a local `dolphin-dap` /
-`dolphin-decomp-mcp` pair, with hardcoded paths. They are not part of the
-package and are gitignored.
+## Background
 
----
-
-# How it works
-
-## The problem
-
-A decompilation project rewrites a shipped binary as C that compiles back to
-the *same bytes*. Progress is measured in bytes matched — melee is at ~91% of
-`.text` as I write this. But that percentage says nothing about **which**
-functions matter. You can spend a week matching a 15 KB function that runs
-once on the results screen, while a 200-byte function in audio init blocks the
-game from booting at all.
-
-This tool reorders the work by execution. Break everything that isn't matched,
-boot it, and see what the game hits first.
-
-## Background: the decomp build never fails
-
-The thing that makes this cheap is a property of how dtk-based decomps link.
-`configure.py` marks each translation unit:
-
-```
-Matching    = True   # Object matches and should be linked
-NonMatching = False  # Object does not match and should not be linked
-```
-
-For a `NonMatching` TU, your C is still compiled — but only so objdiff can
-score it. The **linker is handed dtk's object extracted from the retail DOL
-instead**. `build.ninja` spells this out per file:
+dtk links a `NonMatching` translation unit from its extracted original object,
+not from the compiled source. The C is still compiled — to
+`build/GALE01/src/**.o`, for objdiff scoring — but the linker is handed
+`build/GALE01/obj/**.o` instead. `build.ninja` records this per file:
 
 ```
 # melee/lb/lbvector.c:    lb (Library) (linked True)    -> links build/GALE01/src/.../lbvector.o
 # melee/lb/lbcollision.c: lb (Library) (linked False)   -> links build/GALE01/obj/.../lbcollision.o
 ```
 
-`src/**.o` is yours, `obj/**.o` is theirs. Right now `main.elf` links **1000
-objects: 952 from `src/`, 59 from `obj/`**.
+`main.elf` currently links 1000 objects: 952 from `src/` and 59 from `obj/`.
+`build/GALE01/main.dol` is therefore byte-identical to the retail DOL at any
+level of progress.
 
-The consequence: `build/GALE01/main.dol` is byte-identical to the retail DOL
-whether the project is at 10% or 99%. Verified — the build's DOL compares equal
-to the one on the disc.
+The trap build starts from that complete ROM and overwrites the regions the
+project has not reproduced, so the code that still executes is code the decomp
+regenerates.
 
-So there is nothing to link here, and nothing to copy in. We start from a
-complete, working ROM and **destroy the parts we can't yet claim to have
-reproduced**. Whatever still runs is code the decomp genuinely regenerates.
+## Method
 
-## Building the trap ROM
+### Selection
 
-Five steps, all in [`trapbuild/traprom.py`](trapbuild/traprom.py):
+`build/GALE01/report.json` supplies a `fuzzy_match_percent` per function and a
+`complete` flag per unit. Two predicates (see [Modes](#modes)) turn that into a
+list of functions, sorted by address and written to a manifest.
 
-**1. Decide what to break.** `build/GALE01/report.json` is objdiff's scoring
-output — a `fuzzy_match_percent` per function and a `complete` flag per unit.
-Two predicates (see *Modes* below) turn that into a list of functions.
+### Address translation
 
-**2. Map virtual address to file offset.** The manifest has addresses like
-`0x80006094`; we need a byte offset into the DOL. A DOL header is a section
-table — 18 entries of (file offset, load address, size), 7 text then 11 data —
-so it's a lookup:
+A DOL header is a section table of 18 entries — file offset, load address and
+size, 7 text sections followed by 11 data sections — so a virtual address maps
+to a file offset by lookup:
 
 ```
 virtual 0x80006094  ->  DOL file offset 0x2C74  size 1892
 ```
 
-**3. Overwrite the function in place.**
+### Patching
+
+Each selected function is overwritten in place:
 
 ```
-ORIGINAL  7C0802A6 90010004 9421FE78 DBE10180 DBC10178 ...   mflr/stw/stwu/stfd...
+ORIGINAL  7C0802A6 90010004 9421FE78 DBE10180 DBC10178 ...
 PATCHED   0FE00000 7FE00008 7FE00008 7FE00008 7FE00008 ...
 ```
 
-Same address, same length. Nothing moves, so there is no relocation, no layout
-change, no symbol resolution — and call sites are untouched. The `bl` still
-branches to the same address and hits the trap on arrival.
+Address and length are unchanged, so there is no relocation, layout change or
+symbol resolution. Call sites are not modified; a `bl` branches to the same
+address and executes the trap on arrival.
 
-**4. Splice the DOL into the ISO.** The disc header holds the DOL's file offset
-at `0x420` (`0x1E800` on retail) and the FST's at `0x424` (`0x456E00`, i.e. 32
-bytes past the end of the DOL payload). Because the patched DOL is exactly the
-same length, only the differing byte runs are written into that window and the
-disc's filesystem is never touched:
+### ISO splice
+
+The disc header holds the DOL's file offset at `0x420` (`0x1E800` on retail)
+and the FST's at `0x424` (`0x456E00`, 32 bytes past the end of the DOL
+payload). Since the patched DOL is the same length, only the differing byte
+runs are written into that window and the filesystem is not touched:
 
 ```
 [fn] iso -> ssbm-fn100.iso (279123 bytes spliced in 49786 runs at 0x1E800, clone)
 ```
 
-The output is a copy-on-write clone of the source ISO (APFS `cp -c`, btrfs/XFS
-`cp --reflink`), so each 1.3 GB variant costs ~0 bytes of real disk.
+The output ISO is a copy-on-write clone of the source (APFS `cp -c`, btrfs/XFS
+`cp --reflink`), costing approximately zero bytes of disk per variant, with a
+full-copy fallback on other filesystems.
 
-**5. Boot it and read the crash.** Below.
+### Detection
 
-## The trap instruction
-
-Two PowerPC words, both of which unconditionally raise a Program exception:
-
-| word | encoding | role |
-|---|---|---|
-| `twi 31,r0,<id>` | `0x0FE0xxxx` | first instruction of the function |
-| `tw 31,r0,r0` | `0x7FE00008` | fills the rest of the body |
-
-`tw` is "trap word": compare `rA` against `rB` and trap if any of the
-conditions in the 5-bit `TO` field hold. `TO=31` sets all of them, so it traps
-unconditionally regardless of the operands — PowerPC's `ud2`. `tw 31,r0,r0` is
-the canonical spelling and assembles to `0x7FE00008`.
-
-`twi` is the immediate form, and it traps identically — but its 16-bit `SIMM`
-field is dead weight when `TO=31`, so the entry word carries **its own index
-into the manifest**:
-
-```
-id   0  entry word 0x0FE00000  -> SIMM 0   = lbColl_80006094
-id 100  entry word 0x0FE00064  -> SIMM 100 = mnStageSw_80236CBC
-id 173  entry word 0x0FE000AD  -> SIMM 173 = hsd_803B6BE4
-```
-
-(`.long 0` also faults, but carries no information.)
-
-A Program exception is `OS_ERROR_PROGRAM` = 6, and melee's
+A trap raises a Program exception. `OS_ERROR_PROGRAM` is 6, and
 `db_SetupCrashHandler` installs a handler for it — it skips only 4, 7, 8 and 9
-— so a trap reaches the on-screen exception dump. The SDK's reporter also
-prints it over OSReport, which is what Dolphin logs:
+— so the exception reaches melee's on-screen dump. The SDK's reporter also
+prints it over OSReport:
 
 ```
 - UNHANDLED EXCEPTION -------------------------------
@@ -143,102 +99,109 @@ ERROR 6: (PROGRAM)
 Trap program exception at 8038E034 (read from SRR0)
 ```
 
-SRR0 is the faulting address. Feed it back with `make lookup AT=0x8038E034` and
-you get the function, its unit, its match percentage and its trap id. That is
-your next matching target.
+SRR0 is the faulting address. `make lookup AT=0x8038E034` resolves it against
+the manifest to a function, unit, match percentage and trap id.
 
-## Modes: what actually survives
+## Trap encoding
 
-The two modes differ only in the predicate, but they make very different
-claims. Numbers below are a snapshot at 91.4% matched code.
+| word | encoding | role |
+|---|---|---|
+| `twi 31,r0,<id>` | `0x0FE0xxxx` | first instruction of the function |
+| `tw 31,r0,r0` | `0x7FE00008` | fills the rest of the body |
 
-**`fn` — trap every function scoring below 100%.** Answers *"which function do
-I match next?"*
+`tw` compares `rA` against `rB` and traps if any condition in the 5-bit `TO`
+field holds; `TO=31` sets all of them, so it traps unconditionally regardless
+of operands. `tw 31,r0,r0` is the canonical spelling.
 
-**`tu` — trap every function in a unit that isn't linked**, matched or not.
-Answers *"which TU do I finish linking next?"* Its blockers are usually
-functions that are already at 100%, held back by a sibling in the same file.
+`twi` is the immediate form and traps identically, but its 16-bit `SIMM` field
+is unused when `TO=31`, so the entry word carries its own index into the
+manifest:
+
+```
+id   0  entry word 0x0FE00000  -> SIMM 0   = lbColl_80006094
+id 100  entry word 0x0FE00064  -> SIMM 100 = mnStageSw_80236CBC
+id 173  entry word 0x0FE000AD  -> SIMM 173 = hsd_803B6BE4
+```
+
+`.long 0` also faults, but carries no identifier.
+
+## Modes
+
+- **`fn`** traps every function scoring below 100%. Identifies the next
+  function to match.
+- **`tu`** traps every function in a unit that is not linked, matched or not.
+  Identifies the next TU to link; its blockers are typically functions already
+  at 100% held back by a sibling in the same file.
+
+Provenance of the resulting ROMs, measured at 91.4% matched code:
 
 | | functions | bytes | provenance |
 |---|---|---|---|
-| linked units | 17,491 | 2,926,404 | **physically your compiled output** |
-| unlinked units, scored 100% | 2,160 | 621,292 | **retail bytes, assumed identical** |
+| linked units | 17,491 | 2,926,404 | compiled from the decomp source |
+| unlinked units, scored 100% | 2,160 | 621,292 | retail bytes, assumed identical |
 | unlinked units, scored <100% | 178 | 334,336 | trapped in `fn` mode |
 
-So `tu` mode leaves 17,491 functions running, every one of them genuinely
-yours. `fn` mode leaves 19,651 running, of which **2,160 (11%) are code you
-never linked** — retail's instructions, left in place because objdiff says your
-compile of them *would* be identical.
+`tu` mode leaves 17,491 functions running, all of them linked from the decomp's
+own objects. `fn` mode leaves 19,651 running, of which 2,160 (11%) are retail
+bytes, left in place on the basis of objdiff's score.
 
 ## Limitations
 
-Worth being blunt about, because the build looks like it proves more than it
-does.
-
-- **`fn` mode asserts, it does not substitute.** Those 2,160 functions are
-  retail bytes. objdiff comparing instruction encodings and relocation targets
-  within a function is strong evidence, but it is not the same as having
-  actually linked and run your code. `tu` mode is the one that is physically
-  true.
-- **Function scoring cannot see link-time problems.** A byte-matching object
-  still doesn't validate symbol sizes, boundaries, names or scopes at the split
-  level. Those only surface when the TU is actually linked — which is, again,
-  what `tu` mode tests.
-- **Data is never trapped.** Both modes only touch `.text`. Every byte of
-  `.data`, `.rodata`, `.sdata` and `.bss` follows the same 952/59 split: a
-  linked TU contributes its own data, an unlinked TU contributes retail's. The
-  blunt consequence is that **a wrong `static const` table in an unmatched TU
-  can never make this ROM crash**, because that C isn't in the binary. The
-  project-wide gap is visible in the report: `matched_data` 96.5% against
+- `fn` mode asserts rather than substitutes. The 2,160 functions above are
+  retail bytes; objdiff comparing instruction encodings and relocation targets
+  within a function is not equivalent to linking and running the compiled
+  object. `tu` mode does not have this property.
+- Function scoring does not cover link-time properties. A byte-matching object
+  does not validate split-era symbol sizes, boundaries, names or scopes, which
+  surface only when the TU is linked.
+- Data is never trapped. Both modes touch only `.text`, and data follows the
+  same 952/59 split: a linked TU contributes its own data, an unlinked TU
+  contributes retail's. An incorrect `static const` in an unmatched TU
+  therefore cannot affect the ROM, since that C is not in the binary. The
+  project-wide gap appears in the report as `matched_data` 96.5% against
   `complete_data` 78.1%.
-- **It only tests code the game actually reaches.** Booting to the title screen
-  clears the boot path, not the game. Menus, each stage, each character, each
-  item have to be driven to be covered — and a run that ends with no trap means
-  "nothing on that path", not "matched".
-- **`debugconsole_main` is kept unpatched by default.** It is non-matching, but
-  it owns `Exception_ReportCodeline`, so trapping it makes the reporter
-  double-fault instead of telling you anything. That deliberately leaves 4
-  sub-100% functions running.
-- **Melee's debug console swallows some traps.** Instead of reporting, it parks
-  the faulting thread on the trap instruction and spawns a priority-0 console
-  thread that spins on `VIGetRetraceCount` — so the ROM freezes with audio
-  still playing and nothing is ever printed. Detecting those needs a scan of
-  the OS active-thread list for a saved SRR0 rather than a log grep.
-- **Whole-body fill assumes functions own their bytes.** True for melee: the
-  only non-function `.text` symbols are 11 OS exception-vector / RAS labels,
-  and none fall inside a trapped range. `--fill entry` patches only the first
-  instruction if you'd rather not rely on that.
-- **Your build must reproduce the disc.** Before splicing, the source ISO is
-  checked for the `GALE01` game id and its DOL payload is compared against your
-  `main.dol`. A mismatch means the splice would blend two different binaries,
-  so it is refused.
+- Coverage is limited to code the run reaches. Booting to the title screen
+  exercises the boot path only; menus, stages, characters and items must be
+  driven to be covered. A run ending without a trap means nothing on that path
+  was trapped, not that it is matched.
+- `debugconsole_main` is kept unpatched by default. It is non-matching but owns
+  `Exception_ReportCodeline`, so trapping it makes the reporter double-fault.
+  This leaves 4 sub-100% functions running.
+- Melee's debug console swallows some traps: it parks the faulting thread on
+  the trap instruction and spawns a priority-0 console thread that spins on
+  `VIGetRetraceCount`, so the ROM freezes with audio running and nothing is
+  printed. Detecting those requires scanning the OS active-thread list for a
+  saved SRR0 rather than reading the log.
+- Whole-body fill assumes functions own their bytes. In melee the only
+  non-function `.text` symbols are 11 OS exception-vector and RAS labels, none
+  of which fall inside a trapped range in either mode. `--fill entry` patches
+  only the first instruction.
+- The build must reproduce the source disc. Before splicing, the ISO is checked
+  for the `GALE01` game id and its DOL payload is compared against `main.dol`;
+  a mismatch is refused, since the splice would combine two binaries.
 
----
+## Usage
 
-## Build a trap ROM
-
-See [`trapbuild/README.md`](trapbuild/README.md) for the full usage reference.
+Full reference in [`trapbuild/README.md`](trapbuild/README.md).
 
 ```sh
-export MELEE_REPO=~/etc/melee     # a checkout with a green `ninja`
-cd trapbuild
-make check
-make both                         # -> build/GALE01/ssbm-{fn,tu}100.iso
-make top                          # what to match next, by trapped bytes
-make lookup AT=0x803A00C0         # decode a crash address
+make -C trapbuild check           # verify the inputs
+make -C trapbuild top             # trapped bytes by unit and by function
+make -C trapbuild lookup AT=0x803A00C0
+make -C trapbuild clean
 ```
 
-## Boot it and find the blocker
+### trapwatch.py
 
 ```sh
-python3 trapwatch.py control          # sanity: the unpatched ISO must NOT trap
+python3 trapwatch.py control          # control: the unpatched ISO must not trap
 python3 trapwatch.py fn --seconds 60
-python3 trapwatch.py fn --iterate 5   # ordered list of boot blockers
+python3 trapwatch.py fn --iterate 5
 ```
 
 `--iterate N` re-runs N times; after each hit it adds that function to
-`traprom.py --keep`, rebuilds the ISO, and boots again — so you get the order
-the game would hit them, not just the first.
+`traprom.py --keep`, rebuilds the ISO and boots again, producing the order in
+which the game reaches them.
 
 ```
 === fn run 1/5 (206 traps, 60s limit) ===
@@ -252,37 +215,35 @@ the game would hit them, not just the first.
     8000533C  0x8000533C
 ```
 
-Logs are kept at `<repo>/build/GALE01/trapwatch-<mode>*.log`. They contain
-binary escape sequences from the nogui status line, so `grep -a` them.
+Logs are written to `<repo>/build/GALE01/trapwatch-<mode>*.log`. They contain
+escape sequences from the nogui status line, so `grep -a` is required.
 
-### Requirements beyond the builder
+Requirements beyond the builder:
 
-- A Dolphin with the **nogui frontend**, e.g.
-  `~/etc/dolphin-dap/build/Binaries/dolphin-emu-nogui`. Override with
-  `--dolphin` or `DOLPHIN_NOGUI`. The stock macOS `Dolphin.app` will not work:
-  it has no headless platform, its file logging never emits, and its GDB stub
-  is not reachable.
-- Optional: `configure.py --map && ninja` produces `build/GALE01/main.elf.MAP`,
-  which `trapwatch.py` installs into Dolphin's `Maps/` so Dolphin's own log
-  names functions. Not required — SRR0 is decoded from
+- A Dolphin with the nogui frontend, e.g.
+  `~/etc/dolphin-dap/build/Binaries/dolphin-emu-nogui`; override with
+  `--dolphin` or `DOLPHIN_NOGUI`. The stock macOS `Dolphin.app` does not work:
+  it has no headless platform, its file logging does not emit, and its GDB stub
+  is unreachable.
+- Optionally `configure.py --map && ninja`, which produces
+  `build/GALE01/main.elf.MAP`; `trapwatch.py` installs it into Dolphin's
+  `Maps/` so Dolphin's own log names functions. SRR0 is otherwise decoded from
   `config/GALE01/symbols.txt`.
 
-### How it detects the trap
+Detection reads Dolphin's log for the SDK's `Trap program exception at <SRR0>`
+line rather than using breakpoints, which do not fire under the JIT. The GDB
+connection serves one purpose: the `dolphin-dap` fork boots paused waiting for
+a debug client, so `trapwatch` attaches to the stub and sends a single
+`continue`. The stub does not honour `Dolphin.General.GDBPort` and selects an
+ephemeral port, discovered via `lsof`. Without the resume, the emulator remains
+at the entry point and every run resembles a clean boot.
 
-By reading Dolphin's log for the SDK's `Trap program exception at <SRR0>` line,
-not by breakpoints — **Dolphin's GDB-stub breakpoints do not fire under the
-JIT**, which cost an hour to discover. The GDB connection is used for exactly
-one thing: the `dolphin-dap` fork boots **paused** waiting for a debug client,
-so `trapwatch` attaches to the stub (on an ephemeral port it discovers via
-`lsof`, since `Dolphin.General.GDBPort` is not honoured) and sends a single
-`continue`. Without that, the emulator sits at the entry point and every run
-looks like a clean boot.
+## Recorded run
 
-## Recorded run — 2026-08-22, master `e7844caa6`, 90.00% matched
+2026-08-22, master `e7844caa6`, 90.00% matched. Neither build booted; both
+stopped in audio/HSD init within a second of `main`.
 
-Neither build booted; both died in audio/HSD init, within a second of `main`.
-
-`fn` — real match targets, in the order the game hit them:
+`fn`, in the order reached:
 
 | # | function | unit | match |
 |---|---|---|---|
@@ -292,8 +253,8 @@ Neither build booted; both died in audio/HSD init, within a second of `main`.
 | 4 | `gm_801A4014` | `melee/gm/gm_1A3F` | 97.857% |
 | 5 | `Toy_80305058` | `melee/ty/toy` | 99.498% |
 
-`tu` — all three blockers were *already 100%*, held back only by their TU not
-being linked, which is the distinction the two modes exist to show:
+`tu`, all three already at 100% and held back only by their TU not being
+linked:
 
 | # | function | unit | match |
 |---|---|---|---|
@@ -301,6 +262,5 @@ being linked, which is the distinction the two modes exist to show:
 | 2 | `HSD_SynthInit` | `sysdolphin/baselib/synth` | 100.000% |
 | 3 | `HSD_AudioMalloc` | `sysdolphin/baselib/synth` | 100.000% |
 
-As of 2026-08-26 **all eight are resolved** — matched, or their TU linked — and
-the `fn` build is down from 206 traps to 174. The boot blocker list needs
-re-running.
+As of 2026-08-26 all eight are resolved, and the `fn` build is down from 206
+traps to 174. The list needs re-running.
