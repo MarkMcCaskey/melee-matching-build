@@ -5,12 +5,20 @@ Overwrites every function the decomp has not byte-matched in
 bootable ISO.
 
 ```sh
-export MELEE_REPO=~/etc/melee   # a melee checkout with a green `ninja`
+export MELEE_REPO=~/src/melee        # melee checkout with a green `ninja`
+export MELEE_ISO=~/ssbm_rev2.iso     # retail GALE01 rev 2 disc image
 
-make fn                         # -> build/GALE01/ssbm-fn100.iso   sub-100% functions
-make tu                         # -> build/GALE01/ssbm-tu100.iso   functions in unlinked TUs
+make check                           # confirm both inputs are found
+make fn                              # -> $MELEE_REPO/build/GALE01/ssbm-fn100.iso
+make tu                              # -> $MELEE_REPO/build/GALE01/ssbm-tu100.iso
 make both
+
+# or per invocation, without the environment
+make both REPO=~/src/melee ISO=~/ssbm_rev2.iso
 ```
+
+`fn` traps every function below 100%; `tu` traps every function in an unlinked
+TU. `MELEE_ISO` may be omitted if the image is at `$MELEE_REPO/ssbm_rev2.iso`.
 
 Background, method and limitations: [../README.md](../README.md).
 
@@ -31,15 +39,13 @@ checkout.
 ## Use
 
 ```sh
-make check                       # verify the inputs
 make top                         # trapped bytes by unit and by function
 make lookup AT=0x803A00C0        # resolve a crash address
 make clean
 ```
 
-Other locations: `make fn REPO=~/src/melee ISO=~/isos/ssbm.iso`, or export
-`MELEE_REPO`. Additional variables: `FILL=entry|body`, `KEEP='name1 name2'`,
-`NO_ISO=1`, `FORCE=1`, `LIMIT=20`, `FOR=fn|tu`, `PY=python3.12`.
+Additional variables: `FILL=entry|body`, `KEEP='name1 name2'`, `NO_ISO=1`,
+`FORCE=1`, `LIMIT=20`, `FOR=fn|tu`, `BUILD_DIR=`, `PY=python3.12`.
 
 The script runs standalone:
 

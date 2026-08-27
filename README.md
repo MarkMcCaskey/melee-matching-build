@@ -7,12 +7,20 @@ function that execution reaches first, ordering matching work by reachability
 rather than by byte count.
 
 ```sh
-export MELEE_REPO=~/etc/melee   # a melee checkout with a green `ninja`
+export MELEE_REPO=~/src/melee        # melee checkout with a green `ninja`
+export MELEE_ISO=~/ssbm_rev2.iso     # retail GALE01 rev 2 disc image
 
-make -C trapbuild fn            # -> build/GALE01/ssbm-fn100.iso   sub-100% functions
-make -C trapbuild tu            # -> build/GALE01/ssbm-tu100.iso   functions in unlinked TUs
+make -C trapbuild fn                 # -> $MELEE_REPO/build/GALE01/ssbm-fn100.iso
+make -C trapbuild tu                 # -> $MELEE_REPO/build/GALE01/ssbm-tu100.iso
 make -C trapbuild both
+
+# or per invocation, without the environment
+make -C trapbuild both REPO=~/src/melee ISO=~/ssbm_rev2.iso
 ```
+
+`fn` traps every function below 100%; `tu` traps every function in an unlinked
+TU. `MELEE_ISO` may be omitted if the image is at `$MELEE_REPO/ssbm_rev2.iso`.
+Run `make -C trapbuild check` first to confirm both inputs are found.
 
 | path | |
 |---|---|
